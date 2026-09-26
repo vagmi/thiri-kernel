@@ -25,7 +25,7 @@ function run_in_docker {
 # Make sure we have all the needed tools
 function install_dependencies {
     apt update
-    apt install -y bc flex bison gcc make libelf-dev libssl-dev squashfs-tools busybox-static tree cpio curl patch
+    apt install -y bc flex bison gcc make libelf-dev libssl-dev squashfs-tools busybox-static tree cpio curl patch kmod
 }
 
 # prints the git tag corresponding to the newest and best matching the provided kernel version $1
@@ -58,10 +58,34 @@ function build_version {
   echo "Building kernel version: $version"
   make olddefconfig
   make vmlinux -j "$(nproc)"
+  make modules -j "$(nproc)"
 
   echo "Copying finished build to builds directory"
   mkdir -p "../builds/vmlinux-${version}"
   cp vmlinux "../builds/vmlinux-${version}/vmlinux.bin"
+
+  # Module tree for the guest image. Every driver is built in today, so this is
+  # mostly metadata (modules.builtin, modules.dep, modules.alias ...) -- but it
+  # makes modprobe behave instead of erroring on a missing /lib/modules, and it
+  # lets an option move to =m later without reworking this build.
+  local builds_dir
+  builds_dir="$(cd .. && pwd)/builds"
+  local modroot="${builds_dir}/modroot-${version}"
+  rm -rf "$modroot"
+  make modules_install INSTALL_MOD_PATH="$modroot"
+
+  local kernelrelease
+  kernelrelease="$(make -s kernelrelease)"
+  # These point at the builder's kernel tree and would dangle in the guest.
+  rm -f "$modroot/lib/modules/${kernelrelease}/source" \
+        "$modroot/lib/modules/${kernelrelease}/build"
+  # modules_install skips depmod when there is nothing loadable to install, but
+  # modprobe refuses to start without modules.dep.
+  depmod -b "$modroot" "$kernelrelease"
+
+  tar czf "${builds_dir}/modules-${version}.tar.gz" -C "$modroot" lib
+  rm -rf "$modroot"
+  echo "Module tree written to ${builds_dir}/modules-${version}.tar.gz"
 }
 
 echo "Cloning the linux kernel repository"
